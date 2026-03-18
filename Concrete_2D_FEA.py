@@ -1,40 +1,38 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 
-# =========================
-# USER INPUT
-# =========================
+# -------------------------
+# INPUT DATA
+# -------------------------
 
 nodes = np.array([
     [0, 0],
-    [1, 1],
-    [2, 0]
+    [2, 0],
+    [1, 1]
 ])
 
 elements = [
-    (0, 1),
+    (0, 2),
     (1, 2),
-    (0, 2)
+    (0, 1)
 ]
 
-E = 30e9
+E = 200e9
 A = 0.01
-ft = 3e6
 
 supports = [
-    (0, 0), (0, 1),
-    (2, 1)
+    (0, 0), (0, 1),   # node 0 fixed
+    (1, 1)            # node 1 roller (y only)
 ]
 
-loads = [
-    (1, 1, -10000)
-]
+loads = np.zeros(2 * len(nodes))
+loads[2*2 + 1] = -10000  # downward load at node 2
 
-target_node = 1
 
-# =========================
-# FEA FUNCTIONS
-# =========================
+# -------------------------
+# FUNCTIONS
+# -------------------------
 
 def element_stiffness(n1, n2, E, A):
     x1, y1 = n1
@@ -43,243 +41,217 @@ def element_stiffness(n1, n2, E, A):
     c = (x2-x1)/L
     s = (y2-y1)/L
 
-    return (E*A/L) * np.array([
+    k = (E*A/L) * np.array([
         [ c*c,  c*s, -c*c, -c*s],
         [ c*s,  s*s, -c*s, -s*s],
         [-c*c, -c*s,  c*c,  c*s],
         [-c*s, -s*s,  c*s,  s*s]
     ])
+    return k
 
-def assemble(nodes, elements, E_list, A_list):
-    dof = len(nodes)*2
+
+def assemble(nodes, elements, E_list, A):
+    dof = 2 * len(nodes)
     K = np.zeros((dof, dof))
 
     for i, (n1, n2) in enumerate(elements):
-        k = element_stiffness(nodes[n1], nodes[n2], E_list[i], A_list[i])
-        dof_map = [2*n1, 2*n1+1, 2*n2, 2*n2+1]
+        k = element_stiffness(nodes[n1], nodes[n2], E_list[i], A)
+        dofs = [2*n1, 2*n1+1, 2*n2, 2*n2+1]
 
         for a in range(4):
             for b in range(4):
-                K[dof_map[a], dof_map[b]] += k[a, b]
+                K[dofs[a], dofs[b]] += k[a, b]
 
     return K
 
+
 def apply_bc(K, F, supports):
-    for node, d in supports:
-        idx = 2*node + d
-        K[idx, :] = 0
-        K[:, idx] = 0
-        K[idx, idx] = 1
-        F[idx] = 0
+    for node, direction in supports:
+        dof = 2*node + direction
+        K[dof, :] = 0
+        K[:, dof] = 0
+        K[dof, dof] = 1
+        F[dof] = 0
     return K, F
+
 
 def solve(K, F):
     return np.linalg.solve(K, F)
 
+
 def compute_stress(nodes, elements, u, E_list):
     stresses = []
-    strains = []
-
     for i, (n1, n2) in enumerate(elements):
         x1, y1 = nodes[n1]
         x2, y2 = nodes[n2]
-
         L = np.sqrt((x2-x1)**2 + (y2-y1)**2)
         c = (x2-x1)/L
         s = (y2-y1)/L
 
-        u_e = np.array([
-            u[2*n1], u[2*n1+1],
-            u[2*n2], u[2*n2+1]
-        ])
+        dofs = [2*n1, 2*n1+1, 2*n2, 2*n2+1]
+        u_e = u[dofs]
 
         strain = (1/L) * np.array([-c, -s, c, s]) @ u_e
         stress = E_list[i] * strain
-
-        strains.append(strain)
         stresses.append(stress)
 
-    return np.array(stresses), np.array(strains)
+    return np.array(stresses)
 
-# =========================
-# VISUALIZATION
-# =========================
 
-def plot_truss(nodes, elements, u=None, stresses=None,
-               supports=None, loads=None, scale=1.0, title="Truss"):
+def find_first_crack(stresses):
+    return np.argmax(stresses)  # max tension
 
-    fig, ax = plt.subplots()
-    nodes = np.array(nodes)
-
-    if u is not None:
-        u = u.reshape(-1, 2)
-        deformed_nodes = nodes + scale * u
-    else:
-        deformed_nodes = nodes
-
-    if stresses is not None and len(stresses) > 0:
-        max_stress = max(abs(stresses))
-        if max_stress == 0:
-            max_stress = 1
-    else:
-        max_stress = 1
-
-    # Elements
-    for i, (n1, n2) in enumerate(elements):
-        x = [nodes[n1, 0], nodes[n2, 0]]
-        y = [nodes[n1, 1], nodes[n2, 1]]
-
-        xd = [deformed_nodes[n1, 0], deformed_nodes[n2, 0]]
-        yd = [deformed_nodes[n1, 1], deformed_nodes[n2, 1]]
-
-        if stresses is not None:
-            s = stresses[i] / max_stress
-            color = plt.cm.coolwarm((s + 1) / 2)
-        else:
-            color = "black"
-
-        ax.plot(x, y, 'k--', linewidth=1)
-        ax.plot(xd, yd, color=color, linewidth=3)
-
-        # Stress label
-        if stresses is not None:
-            xm = (xd[0] + xd[1]) / 2
-            ym = (yd[0] + yd[1]) / 2
-            ax.text(xm, ym, f"{stresses[i]/1e6:.2f} MPa",
-                    fontsize=8, ha='center')
-
-    # Nodes
-    ax.scatter(nodes[:, 0], nodes[:, 1], color='black', label="Nodes")
-    ax.scatter(deformed_nodes[:, 0], deformed_nodes[:, 1], color='red', label="Deformed")
-
-    # Supports
-    if supports is not None:
-        for node, d in supports:
-            x, y = nodes[node]
-            if d == 0:
-                ax.scatter(x, y, marker='>', color='green', s=100, label="X Support")
-            elif d == 1:
-                ax.scatter(x, y, marker='^', color='blue', s=100, label="Y Support")
-
-    # Loads with magnitude
-    if loads is not None:
-        for node, d, val in loads:
-            x, y = nodes[node]
-
-            if d == 0:
-                dx = np.sign(val) * 0.3
-                dy = 0
-            else:
-                dx = 0
-                dy = np.sign(val) * 0.3
-
-            ax.arrow(x, y, dx, dy, head_width=0.1, color='purple')
-
-            # Label load magnitude
-            ax.text(x + dx, y + dy, f"{val:.0f} N",
-                    color='purple', fontsize=9)
-
-    # Colorbar
-    if stresses is not None:
-        sm = plt.cm.ScalarMappable(
-            cmap="coolwarm",
-            norm=plt.Normalize(vmin=-max_stress, vmax=max_stress)
-        )
-        sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax)
-        cbar.set_label("Stress (Pa)")
-
-    ax.set_title(title)
-    ax.set_aspect('equal')
-    ax.grid(True)
-
-    handles, labels = ax.get_legend_handles_labels()
-    unique = dict(zip(labels, handles))
-    ax.legend(unique.values(), unique.keys())
-
-    plt.show()
-
-# =========================
-# INITIAL ANALYSIS
-# =========================
-
-E_list = [E]*len(elements)
-A_list = [A]*len(elements)
-
-dof = len(nodes)*2
-F = np.zeros(dof)
-
-for node, d, val in loads:
-    F[2*node + d] = val
-
-K = assemble(nodes, elements, E_list, A_list)
-K, F = apply_bc(K, F, supports)
-
-u = solve(K, F)
-stresses, strains = compute_stress(nodes, elements, u, E_list)
-
-print("\n=== INITIAL ANALYSIS ===")
-print("Displacements (m):")
-print(u)
-
-print("\nStrains:")
-for i, s in enumerate(strains):
-    print(f"Element {i}: {s:.6e}")
-
-print("\nStresses (Pa):")
-for i, s in enumerate(stresses):
-    print(f"Element {i}: {s:.3e}")
-
-plot_truss(nodes, elements, u, stresses,
-           supports=supports,
-           loads=loads,
-           scale=1000,
-           title="Initial Structure")
-
-# =========================
-# REINFORCEMENT
-# =========================
 
 def reinforce(elements, target_node, E_list, factor=5):
     new_E = E_list.copy()
+    reinforced = []
 
     for i, (n1, n2) in enumerate(elements):
         if target_node not in (n1, n2):
             new_E[i] *= factor
+            reinforced.append(i)
 
-    return new_E
+    return new_E, reinforced
 
-E_reinf = reinforce(elements, target_node, E_list)
 
-# =========================
-# RE-ANALYSIS
-# =========================
+# -------------------------
+# PLOTTING
+# -------------------------
 
-K2 = assemble(nodes, elements, E_reinf, A_list)
+def plot(ax, nodes, elements, u, stresses, supports, loads,
+         reinforced_elements=None, scale=10000, title=""):
 
-F2 = np.zeros(dof)
-for node, d, val in loads:
-    F2[2*node + d] = val
+    deformed = nodes + scale * u.reshape(-1, 2)
 
+    # --- Undeformed structure (ghost) ---
+    for (n1, n2) in elements:
+        ax.plot([nodes[n1][0], nodes[n2][0]],
+                [nodes[n1][1], nodes[n2][1]],
+                linestyle='--',
+                color='gray',
+                linewidth=2,
+                alpha=0.6,
+                label="Undeformed" if (n1, n2) == elements[0] else "")
+
+    # Create line segments
+    segments = []
+    for (n1, n2) in elements:
+        segments.append([deformed[n1], deformed[n2]])
+
+    lc = LineCollection(segments, cmap='coolwarm')
+    lc.set_array(stresses)
+    lc.set_linewidth(5)
+    ax.add_collection(lc)
+
+    # Reinforcement overlay (dashed, does NOT override color)
+    if reinforced_elements:
+        for i in reinforced_elements:
+            n1, n2 = elements[i]
+            ax.plot([deformed[n1][0], deformed[n2][0]],
+                    [deformed[n1][1], deformed[n2][1]],
+                    'k--', linewidth=2, label="Reinforced" if i == reinforced_elements[0] else "")
+
+    # Nodes
+    ax.scatter(nodes[:,0], nodes[:,1], color='black', label="Nodes")
+    ax.scatter(deformed[:,0], deformed[:,1], color='red', label="Deformed")
+
+    # Supports
+    for node, d in supports:
+        x, y = nodes[node]
+        if d == 0:
+            ax.plot(x, y, 'g>', markersize=10, label="X Support")
+        else:
+            ax.plot(x, y, 'b^', markersize=10, label="Y Support")
+
+    # Loads
+    for i in range(len(nodes)):
+        fx = loads[2*i]
+        fy = loads[2*i+1]
+        if fx != 0 or fy != 0:
+            ax.arrow(nodes[i][0], nodes[i][1],
+                     fx*0.00005, fy*0.00005,
+                     head_width=0.05, color='purple')
+            ax.text(nodes[i][0], nodes[i][1]+0.1,
+                    f"{fy:.0f} N", color='purple')
+
+    # Stress labels
+    for i, (n1, n2) in enumerate(elements):
+        mid = (deformed[n1] + deformed[n2]) / 2
+        ax.text(mid[0], mid[1],
+                f"{stresses[i]/1e6:.2f} MPa",
+                fontsize=9)
+
+    ax.set_title(title)
+    ax.axis('equal')
+    ax.grid(True)
+
+
+# -------------------------
+# MAIN ANALYSIS
+# -------------------------
+
+E_list = np.array([E]*len(elements))
+
+# BEFORE
+K = assemble(nodes, elements, E_list, A)
+F = loads.copy()
+K, F = apply_bc(K, F, supports)
+u = solve(K, F)
+stresses = compute_stress(nodes, elements, u, E_list)
+crack = find_first_crack(stresses)
+
+# USER TARGET
+target_node = 2
+
+# REINFORCE
+E_new, reinforced_elements = reinforce(elements, target_node, E_list)
+
+# AFTER
+K2 = assemble(nodes, elements, E_new, A)
+F2 = loads.copy()
 K2, F2 = apply_bc(K2, F2, supports)
-
 u2 = solve(K2, F2)
-stresses2, strains2 = compute_stress(nodes, elements, u2, E_reinf)
+stresses2 = compute_stress(nodes, elements, u2, E_new)
+crack2 = find_first_crack(stresses2)
 
-print("\n=== AFTER REINFORCEMENT ===")
-print("Displacements (m):")
-print(u2)
 
-print("\nStrains:")
-for i, s in enumerate(strains2):
-    print(f"Element {i}: {s:.6e}")
+# -------------------------
+# PLOTTING SIDE-BY-SIDE
+# -------------------------
 
-print("\nStresses (Pa):")
+fig, axs = plt.subplots(1, 2, figsize=(14,6))
+
+plot(axs[0], nodes, elements, u, stresses, supports, loads,
+     reinforced_elements=None,
+     title="Before Reinforcement")
+
+plot(axs[1], nodes, elements, u2, stresses2, supports, loads,
+     reinforced_elements=reinforced_elements,
+     title="After Reinforcement")
+
+# Shared colorbar
+# sm = plt.cm.ScalarMappable(cmap='coolwarm')
+# sm.set_array(np.concatenate([stresses, stresses2]))
+# fig.colorbar(sm, ax=axs, label="Stress (Pa)")
+
+plt.tight_layout()
+plt.show()
+
+
+# -------------------------
+# PRINT RESULTS
+# -------------------------
+
+print("\n--- BEFORE ---")
+for i, s in enumerate(stresses):
+    print(f"Element {i}: {s:.2f} Pa")
+
+print(f"First crack element: {crack}")
+
+print("\n--- AFTER ---")
 for i, s in enumerate(stresses2):
-    print(f"Element {i}: {s:.3e}")
+    print(f"Element {i}: {s:.2f} Pa")
 
-plot_truss(nodes, elements, u2, stresses2,
-           supports=supports,
-           loads=loads,
-           scale=1000,
-           title="After Reinforcement")
+print(f"First crack element: {crack2}")
+
+print("\nReinforced elements:", reinforced_elements)
